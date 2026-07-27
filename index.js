@@ -3,11 +3,13 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const { google } = require('googleapis');
 const fs = require('fs');
+const multer = require('multer');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
-app.use(express.json({ limit: '200mb' })); // Для base64-видео
+app.use(express.json({ limit: '50mb' }));      // для /cut
+const upload = multer({ dest: '/tmp/' });      // для /burn-subtitles
 
 // Аутентификация Google Drive
 const auth = new google.auth.JWT(
@@ -56,40 +58,36 @@ app.post('/cut', async (req, res) => {
   }
 });
 
-// ─── Вжигание субтитров (принимает JSON) ────
-app.post('/burn-subtitles', (req, res) => {
-  const { videoBase64, srt } = req.body;
-  if (!videoBase64 || !srt) {
-    return res.status(400).json({ error: 'videoBase64 и srt обязательны' });
+// ─── Вжигание субтитров (принимает ФАЙЛ) ────
+app.post('/burn-subtitles', upload.single('video'), (req, res) => {
+  const { srt } = req.body;
+  if (!req.file || !srt) {
+    return res.status(400).json({ error: 'video (файл) и srt (текст) обязательны' });
   }
 
-  const videoPath = `/tmp/video_${Date.now()}.mp4`;
   const srtPath = `/tmp/sub_${Date.now()}.srt`;
   const outputPath = `/tmp/subbed_${Date.now()}.mp4`;
 
   try {
-    const buffer = Buffer.from(videoBase64, 'base64');
-    fs.writeFileSync(videoPath, buffer);
     fs.writeFileSync(srtPath, srt, 'utf-8');
-
-    ffmpeg(videoPath)
+    ffmpeg(req.file.path)
       .outputOptions('-vf', `subtitles=${srtPath}`)
       .output(outputPath)
       .on('end', () => {
         res.sendFile(outputPath, { absolute: true }, () => {
-          try { fs.unlinkSync(videoPath); } catch (e) {}
+          try { fs.unlinkSync(req.file.path); } catch (e) {}
           try { fs.unlinkSync(srtPath); } catch (e) {}
           try { fs.unlinkSync(outputPath); } catch (e) {}
         });
       })
       .on('error', (err) => {
-        try { fs.unlinkSync(videoPath); } catch (e) {}
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
         try { fs.unlinkSync(srtPath); } catch (e) {}
         res.status(500).json({ error: err.message });
       })
       .run();
   } catch (err) {
-    try { fs.unlinkSync(videoPath); } catch (e) {}
+    try { fs.unlinkSync(req.file.path); } catch (e) {}
     res.status(500).json({ error: err.message });
   }
 });
