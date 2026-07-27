@@ -21,47 +21,100 @@ app.post('/cut', (req, res) => {
   const inputPath = `/tmp/input_${Date.now()}.mp4`;
   const outputPath = `/tmp/clip_${Date.now()}.mp4`;
 
-  // Используем прямую ссылку с confirm-параметром
-  const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`;
+  console.log(`Скачиваю файл ${fileId}...`);
 
-  console.log(`Скачиваю: ${downloadUrl}`);
-
-  const file = fs.createWriteStream(inputPath);
-
-  https.get(downloadUrl, (response) => {
-    response.pipe(file);
-
-    file.on('finish', () => {
-      file.close();
-
+  downloadLargeFile(fileId, inputPath)
+    .then(() => {
       const stats = fs.statSync(inputPath);
       console.log(`Скачано: ${(stats.size / 1024 / 1024).toFixed(1)} МБ`);
-
-      if (stats.size < 10000) {
+      return cutVideo(inputPath, outputPath, start, end);
+    })
+    .then(() => {
+      console.log('Клип готов');
+      res.sendFile(outputPath, { absolute: true }, () => {
         try { fs.unlinkSync(inputPath); } catch (e) {}
-        return res.status(400).json({ error: 'Файл не скачался. Проверьте, что ссылка открыта для всех.' });
+        try { fs.unlinkSync(outputPath); } catch (e) {}
+      });
+    })
+    .catch((err) => {
+      console.error('Ошибка:', err.message);
+      try { fs.unlinkSync(inputPath); } catch (e) {}
+      try { fs.unlinkSync(outputPath); } catch (e) {}
+      res.status(500).json({ error: err.message });
+    });
+});
+
+// Функция для скачивания больших файлов с обходом предупреждения о вирусах
+function downloadLargeFile(fileId, dest) {
+  return new Promise((resolve, reject) => {
+    const baseUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+    
+    // Первый запрос — получаем куки и confirm-код
+    https.get(baseUrl, (response) => {
+      let cookies = [];
+      let html = '';
+
+      // Собираем куки
+      if (response.headers['set-cookie']) {
+        cookies = response.headers['set-cookie'];
       }
 
-      ffmpeg(inputPath)
-        .setStartTime(parseFloat(start))
-        .setDuration(parseFloat(end) - parseFloat(start))
-        .output(outputPath)
-        .on('end', () => {
-          res.sendFile(outputPath, { absolute: true }, () => {
-            try { fs.unlinkSync(inputPath); } catch (e) {}
-            try { fs.unlinkSync(outputPath); } catch (e) {}
+      response.on('data', (chunk) => {
+        html += chunk.toString();
+      });
+
+      response.on('end', () => {
+        // Ищем confirm-код в HTML
+        const confirmMatch = html.match(/confirm=([^&"'\s]+)/);
+        
+        if (confirmMatch) {
+          const confirmCode = confirmMatch[1];
+          console.log(`Найден confirm-код: ${confirmCode}`);
+          
+          // Формируем URL с confirm-кодом
+          const downloadUrl = `${baseUrl}&confirm=${confirmCode}`;
+          
+          // Скачиваем файл с куками
+          const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
+          
+          https.get(downloadUrl, {
+            headers: { 'Cookie': cookieString }
+          }, (resp) => {
+            const file = fs.createWriteStream(dest);
+            resp.pipe(file);
+            file.on('finish', () => {
+              file.close();
+              resolve();
+            });
+            file.on('error', reject);
+          }).on('error', reject);
+        } else {
+          // confirm-код не найден — возможно, файл маленький и отдался сразу
+          const file = fs.createWriteStream(dest);
+          file.write(html);
+          file.end();
+          file.on('finish', () => {
+            file.close();
+            resolve();
           });
-        })
-        .on('error', (err) => {
-          try { fs.unlinkSync(inputPath); } catch (e) {}
-          res.status(500).json({ error: err.message });
-        })
-        .run();
-    });
-  }).on('error', (err) => {
-    res.status(500).json({ error: 'Ошибка скачивания: ' + err.message });
+          file.on('error', reject);
+        }
+      });
+    }).on('error', reject);
   });
-});
+}
+
+function cutVideo(input, output, start, end) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(input)
+      .setStartTime(parseFloat(start))
+      .setDuration(parseFloat(end) - parseFloat(start))
+      .output(output)
+      .on('end', resolve)
+      .on('error', reject)
+      .run();
+  });
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`API на порту ${PORT}`));
