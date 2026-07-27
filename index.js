@@ -21,85 +21,112 @@ app.post('/cut', (req, res) => {
   const inputPath = `/tmp/input_${Date.now()}.mp4`;
   const outputPath = `/tmp/clip_${Date.now()}.mp4`;
 
-  console.log(`Скачиваю файл ${fileId}...`);
+  console.log(`Пытаюсь скачать файл ${fileId}...`);
 
-  downloadLargeFile(fileId, inputPath)
+  // Пробуем три способа скачать файл
+  tryDownload(fileId, inputPath)
     .then(() => {
+      // ПРОВЕРЯЕМ, ЧТО СКАЧАЛОСЬ
       const stats = fs.statSync(inputPath);
-      console.log(`Скачано: ${(stats.size / 1024 / 1024).toFixed(1)} МБ`);
+      const firstBytes = fs.readFileSync(inputPath, { encoding: null, start: 0, end: 200 });
+      
+      console.log(`Размер файла: ${stats.size} байт`);
+      console.log(`Первые байты (hex): ${firstBytes.toString('hex').slice(0, 100)}`);
+      console.log(`Первые байты (text): ${firstBytes.toString('utf-8').slice(0, 100)}`);
+
+      // Проверяем, не HTML ли это
+      if (firstBytes.toString('utf-8').includes('<!DOCTYPE html>') || 
+          firstBytes.toString('utf-8').includes('<html')) {
+        const html = fs.readFileSync(inputPath, 'utf-8');
+        console.error('СКАЧАЛСЯ HTML вместо видео!');
+        console.error('HTML:', html.slice(0, 500));
+        throw new Error('Google Drive вернул HTML вместо видео. Проверьте доступ к файлу.');
+      }
+
+      // Проверяем, не пустой ли файл
+      if (stats.size < 1000) {
+        throw new Error(`Файл слишком маленький: ${stats.size} байт`);
+      }
+
+      console.log('Файл похож на видео, нарезаю...');
       return cutVideo(inputPath, outputPath, start, end);
     })
     .then(() => {
-      console.log('Клип готов');
+      console.log('Клип готов!');
       res.sendFile(outputPath, { absolute: true }, () => {
         try { fs.unlinkSync(inputPath); } catch (e) {}
         try { fs.unlinkSync(outputPath); } catch (e) {}
       });
     })
     .catch((err) => {
-      console.error('Ошибка:', err.message);
+      console.error('ОШИБКА:', err.message);
       try { fs.unlinkSync(inputPath); } catch (e) {}
       try { fs.unlinkSync(outputPath); } catch (e) {}
       res.status(500).json({ error: err.message });
     });
 });
 
-// Функция для скачивания больших файлов с обходом предупреждения о вирусах
-function downloadLargeFile(fileId, dest) {
+// Три способа скачать файл
+async function tryDownload(fileId, dest) {
+  // Способ 1: простая ссылка с confirm=t
+  try {
+    console.log('Способ 1: confirm=t');
+    await downloadFile(`https://drive.google.com/uc?export=download&id=${fileId}&confirm=t`, dest);
+    if (fs.statSync(dest).size > 10000) return;
+  } catch (e) {
+    console.log('Способ 1 не сработал:', e.message);
+  }
+
+  // Способ 2: через confirm-код из страницы
+  try {
+    console.log('Способ 2: ищем confirm-код');
+    const confirmCode = await getConfirmCode(fileId);
+    if (confirmCode) {
+      await downloadFile(`https://drive.google.com/uc?export=download&id=${fileId}&confirm=${confirmCode}`, dest);
+      if (fs.statSync(dest).size > 10000) return;
+    }
+  } catch (e) {
+    console.log('Способ 2 не сработал:', e.message);
+  }
+
+  // Способ 3: прямая ссылка drive.google.com/file/d/.../view
+  try {
+    console.log('Способ 3: прямая ссылка');
+    await downloadFile(`https://drive.google.com/file/d/${fileId}/view`, dest);
+    if (fs.statSync(dest).size > 10000) return;
+  } catch (e) {
+    console.log('Способ 3 не сработал:', e.message);
+  }
+
+  throw new Error('Ни один способ скачивания не сработал');
+}
+
+function getConfirmCode(fileId) {
   return new Promise((resolve, reject) => {
-    const baseUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-    
-    // Первый запрос — получаем куки и confirm-код
-    https.get(baseUrl, (response) => {
-      let cookies = [];
+    https.get(`https://drive.google.com/uc?export=download&id=${fileId}`, (res) => {
       let html = '';
+      res.on('data', chunk => html += chunk);
+      res.on('end', () => {
+        const match = html.match(/confirm=([^&"'\s]+)/);
+        resolve(match ? match[1] : null);
+      });
+    }).on('error', reject);
+  });
+}
 
-      // Собираем куки
-      if (response.headers['set-cookie']) {
-        cookies = response.headers['set-cookie'];
+function downloadFile(url, dest) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    https.get(url, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        https.get(response.headers.location, (resp) => {
+          resp.pipe(file);
+          file.on('finish', () => { file.close(); resolve(); });
+        }).on('error', reject);
+      } else {
+        response.pipe(file);
+        file.on('finish', () => { file.close(); resolve(); });
       }
-
-      response.on('data', (chunk) => {
-        html += chunk.toString();
-      });
-
-      response.on('end', () => {
-        // Ищем confirm-код в HTML
-        const confirmMatch = html.match(/confirm=([^&"'\s]+)/);
-        
-        if (confirmMatch) {
-          const confirmCode = confirmMatch[1];
-          console.log(`Найден confirm-код: ${confirmCode}`);
-          
-          // Формируем URL с confirm-кодом
-          const downloadUrl = `${baseUrl}&confirm=${confirmCode}`;
-          
-          // Скачиваем файл с куками
-          const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
-          
-          https.get(downloadUrl, {
-            headers: { 'Cookie': cookieString }
-          }, (resp) => {
-            const file = fs.createWriteStream(dest);
-            resp.pipe(file);
-            file.on('finish', () => {
-              file.close();
-              resolve();
-            });
-            file.on('error', reject);
-          }).on('error', reject);
-        } else {
-          // confirm-код не найден — возможно, файл маленький и отдался сразу
-          const file = fs.createWriteStream(dest);
-          file.write(html);
-          file.end();
-          file.on('finish', () => {
-            file.close();
-            resolve();
-          });
-          file.on('error', reject);
-        }
-      });
     }).on('error', reject);
   });
 }
