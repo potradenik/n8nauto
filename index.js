@@ -105,6 +105,5 @@ function cutVideo(input, output, start, end) {
       .run();
   });
 }
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Сервер на порту ${PORT}`));
