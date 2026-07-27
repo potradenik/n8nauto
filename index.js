@@ -4,6 +4,7 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const { google } = require('googleapis');
 const fs = require('fs');
 const multer = require('multer');
+const upload = multer({ dest: '/tmp/' });
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -70,7 +71,6 @@ app.post('/cut', async (req, res) => {
 // ─── Наложение субтитров (принимает файл) ─────────
 app.post('/burn-subtitles', upload.single('video'), (req, res) => {
   const { srt } = req.body;
-
   if (!req.file || !srt) {
     return res.status(400).json({ error: 'video (файл) и srt (текст) обязательны' });
   }
