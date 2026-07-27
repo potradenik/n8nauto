@@ -90,3 +90,4 @@ function cutVideo(input, output, start, end) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FFmpeg API запущен на порту ${PORT}`));
+
