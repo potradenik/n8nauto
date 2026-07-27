@@ -8,11 +8,11 @@ const multer = require('multer');
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
-// Для JSON-запросов (стартовая нарезка)
-app.use(express.json({ limit: '50mb' }));
-
-// Для Form-Data (субтитры)
+// Увеличиваем лимит для JSON (base64 видео)
 const upload = multer({ dest: '/tmp/' });
+
+// Увеличиваем лимит для JSON (оригинальный /cut всё ещё принимает JSON)
+app.use(express.json({ limit: '200mb' }));
 
 // Аутентификация Google Drive API
 const auth = new google.auth.JWT(
@@ -37,7 +37,8 @@ app.post('/cut', async (req, res) => {
   const outputPath = `/tmp/clip_${Date.now()}.mp4`;
 
   try {
-    console.log(`Скачиваю файл ${fileId}...`);
+    // Скачиваем через Google Drive API
+    console.log(`Скачиваю ${fileId}...`);
     const response = await drive.files.get(
       { fileId, alt: 'media' },
       { responseType: 'stream' }
@@ -53,6 +54,7 @@ app.post('/cut', async (req, res) => {
     if (stats.size < 10000) throw new Error('Скачался не видеофайл');
     console.log(`Скачано: ${(stats.size / 1024 / 1024).toFixed(1)} МБ`);
 
+    // Нарезка (копирование потоков)
     console.log(`Нарезаю ${start}–${end}...`);
     await cutVideo(inputPath, outputPath, parseFloat(start), parseFloat(end));
 
@@ -68,42 +70,59 @@ app.post('/cut', async (req, res) => {
   }
 });
 
-// ─── Вжигание субтитров (принимает файл и текст) ────
+// ─── Наложение субтитров ───────────────────────────
+app.post('/burn-subtitles', (req, res) => {
+  const { videoBase64, srt } = req.body;
+// ─── Наложение субтитров (принимает файл) ─────────
 app.post('/burn-subtitles', upload.single('video'), (req, res) => {
   const { srt } = req.body;
+
+  if (!videoBase64 || !srt) {
+    return res.status(400).json({ error: 'videoBase64 и srt обязательны' });
   if (!req.file || !srt) {
     return res.status(400).json({ error: 'video (файл) и srt (текст) обязательны' });
   }
 
+  const videoPath = `/tmp/video_${Date.now()}.mp4`;
   const srtPath = `/tmp/sub_${Date.now()}.srt`;
   const outputPath = `/tmp/subbed_${Date.now()}.mp4`;
 
   try {
+    // Декодируем видео из base64
+    const videoBuffer = Buffer.from(videoBase64, 'base64');
+    fs.writeFileSync(videoPath, videoBuffer);
+    console.log(`Видео получено, размер: ${(videoBuffer.length / 1024 / 1024).toFixed(1)} МБ`);
+
+    // Сохраняем SRT-файл
     fs.writeFileSync(srtPath, srt, 'utf-8');
 
+    // Вжигаем субтитры
+    ffmpeg(videoPath)
     ffmpeg(req.file.path)
       .outputOptions('-vf', `subtitles=${srtPath}`)
       .output(outputPath)
       .on('end', () => {
         res.sendFile(outputPath, { absolute: true }, () => {
+          try { fs.unlinkSync(videoPath); } catch (e) {}
           try { fs.unlinkSync(req.file.path); } catch (e) {}
           try { fs.unlinkSync(srtPath); } catch (e) {}
           try { fs.unlinkSync(outputPath); } catch (e) {}
         });
       })
       .on('error', (err) => {
+        try { fs.unlinkSync(videoPath); } catch (e) {}
         try { fs.unlinkSync(req.file.path); } catch (e) {}
         try { fs.unlinkSync(srtPath); } catch (e) {}
         res.status(500).json({ error: err.message });
       })
       .run();
   } catch (err) {
+    try { fs.unlinkSync(videoPath); } catch (e) {}
     try { fs.unlinkSync(req.file.path); } catch (e) {}
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Вспомогательная функция ────────────────────────
 function cutVideo(input, output, start, end) {
   return new Promise((resolve, reject) => {
     ffmpeg(input)
@@ -120,3 +139,4 @@ function cutVideo(input, output, start, end) {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Сервер на порту ${PORT}`));
+app.listen(PORT, () => console.log(`FFmpeg API на порту ${PORT}`));
