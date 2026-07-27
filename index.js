@@ -4,15 +4,15 @@ const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const { google } = require('googleapis');
 const fs = require('fs');
 const multer = require('multer');
-const upload = multer({ dest: '/tmp/' });
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
-const upload = multer({ dest: '/tmp/' });
+// Для JSON-запросов (стартовая нарезка)
+app.use(express.json({ limit: '50mb' }));
 
-// Увеличиваем лимит для JSON (оригинальный /cut всё ещё принимает JSON)
-app.use(express.json({ limit: '200mb' }));
+// Для Form-Data (субтитры)
+const upload = multer({ dest: '/tmp/' });
 
 // Аутентификация Google Drive API
 const auth = new google.auth.JWT(
@@ -37,7 +37,7 @@ app.post('/cut', async (req, res) => {
   const outputPath = `/tmp/clip_${Date.now()}.mp4`;
 
   try {
-    console.log(`Скачиваю ${fileId}...`);
+    console.log(`Скачиваю файл ${fileId}...`);
     const response = await drive.files.get(
       { fileId, alt: 'media' },
       { responseType: 'stream' }
@@ -68,7 +68,7 @@ app.post('/cut', async (req, res) => {
   }
 });
 
-// ─── Наложение субтитров (принимает файл) ─────────
+// ─── Вжигание субтитров (принимает файл и текст) ────
 app.post('/burn-subtitles', upload.single('video'), (req, res) => {
   const { srt } = req.body;
   if (!req.file || !srt) {
@@ -103,6 +103,7 @@ app.post('/burn-subtitles', upload.single('video'), (req, res) => {
   }
 });
 
+// ─── Вспомогательная функция ────────────────────────
 function cutVideo(input, output, start, end) {
   return new Promise((resolve, reject) => {
     ffmpeg(input)
@@ -118,4 +119,4 @@ function cutVideo(input, output, start, end) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`FFmpeg API на порту ${PORT}`));
+app.listen(PORT, () => console.log(`Сервер на порту ${PORT}`));
